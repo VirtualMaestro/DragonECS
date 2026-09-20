@@ -279,6 +279,10 @@ namespace DCFApixels.DragonECS
         /// <summary>
         /// Remove all components from the pool and unregister them from the world.
         /// </summary>
+        /// <remarks>
+        /// Components added by callbacks on IDs outside the initial set survive the clear.
+        /// If a callback throws, completed removals are retained.
+        /// </remarks>
         public void ClearAll()
         {
 #if DEBUG
@@ -288,14 +292,38 @@ namespace DCFApixels.DragonECS
 #endif
             if (_count <= 0) { return; }
             var span = _registrar.World.Where(out SingleTagAspect<T> _);
-            _count = 0;
-            foreach (var entityID in span)
-            {
-                _mapping[entityID] = false;
-                _registrar.UnregisterComponent(entityID);
+            if (!_registrar.HasEntityListeners
 #if !DRAGONECS_DISABLE_POOLS_EVENTS
-                if (_hasAnyListener) { _listeners.InvokeOnDel(entityID); }
+                && !_hasAnyListener
 #endif
+                )
+            {
+                foreach (int entityID in span)
+                {
+                    _mapping[entityID] = false;
+                    _registrar.UnregisterComponent(entityID);
+                }
+                _count = 0;
+                return;
+            }
+
+            using (var entities = TempAllocator.From<int>(span.AsSystemSpan()))
+            {
+                foreach (int entityID in entities.AsSpan())
+                {
+                    if (!_mapping[entityID]) { continue; }
+#if DEBUG
+                    if (_isLocked) { EcsPoolThrowHelper.ThrowPoolLocked(); }
+#elif DRAGONECS_STABILITY_MODE
+                    if (_isLocked) { return; }
+#endif
+                    _mapping[entityID] = false;
+                    _count--;
+                    _registrar.UnregisterComponent(entityID);
+#if !DRAGONECS_DISABLE_POOLS_EVENTS
+                    if (_hasAnyListener) { _listeners.InvokeOnDel(entityID); }
+#endif
+                }
             }
         }
         #endregion
@@ -501,7 +529,7 @@ namespace DCFApixels.DragonECS
 #if DEBUG
             if (Has(entityID) == false) { EcsPoolThrowHelper.ThrowNotHaveComponent<T>(entityID); }
 #endif
-            return default;
+            return ((IEcsReadonlyPool)_pool).GetRaw(entityID);
         }
 
 #if !DRAGONECS_DISABLE_POOLS_EVENTS

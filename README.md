@@ -567,6 +567,8 @@ poses.Del(entityID);
 
 > Defining `DRAGONECS_STABILITY_MODE` enables checks in Release with safe handling instead of exceptions. See [Define Symbols](#define-symbols) for more details.
 
+> Structural changes to the same pool from component `OnAdd`/`OnDel`, or to either participating pool from custom `Copy`, are unsupported and may invalidate component references. Queue changes and apply them after the callback returns. DEBUG only prints a warning once per pool; the operation is not blocked or made safe, including in Stability Mode.
+
 <details> 
 <summary>Custom Pools</summary>
 

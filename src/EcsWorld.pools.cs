@@ -500,6 +500,11 @@ namespace DCFApixels.DragonECS
             public readonly EcsMaskChunck MaskChunck;
             public readonly int ComponentTypeID;
             public readonly short WorldID;
+            internal bool HasEntityListeners
+            {
+                [MethodImpl(MethodImplOptions.AggressiveInlining)]
+                get { return World._hasAnyEntityListener; }
+            }
             private ComponentsRegistrar(EcsWorld world, int componentTypeID)
             {
                 World = world;

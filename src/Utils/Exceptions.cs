@@ -48,12 +48,6 @@ namespace DCFApixels.DragonECS.Core.Internal
         }
 
         [MethodImpl(MethodImplOptions.NoInlining)]
-        internal static void PoolStorageInCallback()
-        {
-            throw new InvalidOperationException("Cannot resize or remove components while a lifecycle or copy callback holds references to this pool. Defer the structural change until the callback returns.");
-        }
-
-        [MethodImpl(MethodImplOptions.NoInlining)]
         internal static void ConstraintIsAlreadyContainedInMask(EcsTypeCode typeCode)
         {
             string typeName = EcsDebugUtility.GetGenericTypeName(EcsTypeCodeManager.FindTypeOfCode(typeCode).Type);

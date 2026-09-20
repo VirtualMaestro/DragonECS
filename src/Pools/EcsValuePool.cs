@@ -66,6 +66,11 @@ namespace DCFApixels.DragonECS
         private readonly bool _isCustomLifecycle = EcsComponentLifecycle<T>.IsCustom;
         private readonly IEcsComponentCopy<T> _customCopy = EcsComponentCopy<T>.CustomHandler;
         private readonly bool _isCustomCopy = EcsComponentCopy<T>.IsCustom;
+#if DEBUG
+        // Diagnostic only: structural changes from ref callbacks are unsupported.
+        private int _activeRefCallbacks;
+        private bool _structuralChangeWarningPrinted;
+#endif
 
         private bool _isLocked;
 
@@ -236,7 +241,10 @@ namespace DCFApixels.DragonECS
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public ref T Add(int entityID)
         {
-            ref int itemIndex = ref _mapping[entityID];
+#if DEBUG
+            if (_activeRefCallbacks != 0 && !_structuralChangeWarningPrinted) { WarnStructuralChangeInCallback(); }
+#endif
+            int itemIndex = _mapping[entityID];
 #if DEBUG
             if (entityID == EcsConsts.NULL_ENTITY_ID) { Throw.Ent_ThrowIsNotAlive(_registrar.World, entityID); }
             if (_registrar.World.IsUsed(entityID) == false) { Throw.Ent_ThrowIsNotAlive(_registrar.World, entityID); }
@@ -273,6 +281,7 @@ namespace DCFApixels.DragonECS
                 }
                 _usedBlockCount++;
             }
+            _mapping[entityID] = itemIndex;
             _dense.Ptr[_itemsCount] = entityID;
             _registrar.RegisterComponent(entityID);
             ref T result = ref _items[itemIndex];
@@ -341,7 +350,10 @@ namespace DCFApixels.DragonECS
         /// <param name="entityID">Entity identifier.</param>
         public void Del(int entityID)
         {
-            ref int itemIndex = ref _mapping[entityID];
+#if DEBUG
+            if (_activeRefCallbacks != 0 && !_structuralChangeWarningPrinted) { WarnStructuralChangeInCallback(); }
+#endif
+            int itemIndex = _mapping[entityID];
 #if DEBUG
             if (entityID == EcsConsts.NULL_ENTITY_ID) { EcsPoolThrowHelper.ThrowEntityIsNotAlive(_registrar.World, entityID); }
             if (itemIndex <= 0) { EcsPoolThrowHelper.ThrowNotHaveComponent<T>(entityID); }
@@ -355,7 +367,7 @@ namespace DCFApixels.DragonECS
 
             _dense.Ptr[_itemsCount] = itemIndex;
             _itemsCount--;
-            itemIndex = 0;
+            _mapping[entityID] = 0;
 
             _recycledItemsCount++;
             _isDensified = false;
@@ -395,8 +407,7 @@ namespace DCFApixels.DragonECS
 #elif DRAGONECS_STABILITY_MODE
             if (!Has(fromEntityID)) { return; }
 #endif
-            ref T destination = ref TryAddOrGet(toEntityID);
-            EcsComponentCopy<T>.Copy(_isCustomCopy, _customCopy, ref Get(fromEntityID), ref destination);
+            CopyTo(fromEntityID, this, toEntityID);
         }
 
         /// <summary>
@@ -413,46 +424,111 @@ namespace DCFApixels.DragonECS
 #elif DRAGONECS_STABILITY_MODE
             if (!Has(fromEntityID)) { return; }
 #endif
-            ref T destination = ref toWorld.GetPool<T>().TryAddOrGet(toEntityID);
-            EcsComponentCopy<T>.Copy(_isCustomCopy, _customCopy, ref Get(fromEntityID), ref destination);
+            CopyTo(fromEntityID, toWorld.GetPool<T>(), toEntityID);
+        }
+
+        private void CopyTo(int fromEntityID, EcsValuePool<T> target, int toEntityID)
+        {
+            // Finish additions/listeners before taking either component reference.
+            target.TryAddOrGet(toEntityID);
+            ref T source = ref Get(fromEntityID);
+            ref T destination = ref target._items[target._mapping[toEntityID]];
+#if DEBUG
+            if (_isCustomCopy)
+            {
+                _activeRefCallbacks++;
+                target._activeRefCallbacks++;
+                try { _customCopy.Copy(ref source, ref destination); }
+                finally
+                {
+                    target._activeRefCallbacks--;
+                    _activeRefCallbacks--;
+                }
+                return;
+            }
+#endif
+            EcsComponentCopy<T>.Copy(_isCustomCopy, _customCopy, ref source, ref destination);
         }
 
         /// <summary>
         /// Remove all components from the pool and unregister them from the world.
         /// </summary>
+        /// <remarks>
+        /// Components added by callbacks on IDs outside the initial set survive the clear.
+        /// If a callback throws, completed removals are retained.
+        /// </remarks>
         public void ClearAll()
         {
 #if DEBUG
             if (_isLocked) { EcsPoolThrowHelper.ThrowPoolLocked(); }
+            if (_activeRefCallbacks != 0 && !_structuralChangeWarningPrinted) { WarnStructuralChangeInCallback(); }
 #elif DRAGONECS_STABILITY_MODE
             if (_isLocked) { return; }
 #endif
-            _recycledItemsCount = 0; // спереди чтобы обнулялось, так как Del не обнуляет
-            if (_itemsCount <= 0)
+            if (_itemsCount <= 0) { return; }
+            // No callbacks: no snapshot, densification or per-component recycle bookkeeping.
+            if (!_isCustomLifecycle && !_registrar.HasEntityListeners)
             {
+                if (_isDensified && _itemsCount < _usedBlockCount)
+                {
+                    // Reuse the dense list when it is already valid and slots contain holes.
+                    for (int i = 1; i <= _itemsCount; i++)
+                    {
+                        int entityID = _dense.Ptr[i];
+                        int itemIndex = _mapping[entityID];
+                        _itemEntities.Ptr[itemIndex] = 0;
+                        _mapping[entityID] = 0;
+                        _registrar.UnregisterComponent(entityID);
+                    }
+                }
+                else
+                {
+                    for (int itemIndex = 1; itemIndex <= _usedBlockCount; itemIndex++)
+                    {
+                        int entityID = _itemEntities.Ptr[itemIndex];
+                        if (entityID == 0) { continue; }
+                        _itemEntities.Ptr[itemIndex] = 0;
+                        _mapping[entityID] = 0;
+                        _registrar.UnregisterComponent(entityID);
+                    }
+                }
+                _itemsCount = 0;
                 _usedBlockCount = 0;
+                _recycledItemsCount = 0;
                 _isDensified = true;
                 return;
             }
-            var span = _registrar.World.Where(_staticMask);
-#if DRAGONECS_DEEP_DEBUG
-            if (span.Count != _itemsCount)
+
+            // Preserve the initial set and consistent state at every user callback.
+            // Pending entity deletions still own components: do not use the public live-entity span.
+            Densify();
+            using (var entities = TempAllocator.From<int>(new ReadOnlySpan<int>(_dense.Ptr + 1, _itemsCount)))
             {
-                Throw.DeepDebugException();
-            }
+                foreach (int entityID in entities.AsSpan())
+                {
+                    int itemIndex = _mapping[entityID];
+                    if (itemIndex == 0) { continue; }
+#if DEBUG
+                    if (_isLocked) { EcsPoolThrowHelper.ThrowPoolLocked(); }
+#elif DRAGONECS_STABILITY_MODE
+                    if (_isLocked) { return; }
 #endif
-            foreach (var entityID in span)
-            {
-                ref int itemIndex = ref _mapping[entityID];
-                InvokeOnDel(entityID, itemIndex);
-                _itemEntities.Ptr[itemIndex] = 0;
-                itemIndex = 0;
-                _registrar.UnregisterComponent(entityID);
+                    InvokeOnDel(entityID, itemIndex);
+                    _itemEntities.Ptr[itemIndex] = 0;
+                    _dense.Ptr[_itemsCount] = itemIndex;
+                    _itemsCount--;
+                    _mapping[entityID] = 0;
+                    _recycledItemsCount++;
+                    _isDensified = false;
+                    _registrar.UnregisterComponent(entityID);
+                    if (_itemsCount == 0)
+                    {
+                        _usedBlockCount = 0;
+                        _recycledItemsCount = 0;
+                        _isDensified = true;
+                    }
+                }
             }
-            _itemsCount = 0;
-            _usedBlockCount = 0;
-            _recycledItemsCount = 0;
-            _isDensified = true;
         }
         private void Densify()
         {
@@ -557,7 +633,11 @@ namespace DCFApixels.DragonECS
         {
             if (_isCustomLifecycle)
             {
+#if DEBUG
+                InvokeCustomOnAdd(entityID, ref component);
+#else
                 _customLifecycle.OnAdd(ref component, _registrar.WorldID, entityID);
+#endif
             }
             else if (RuntimeHelpers.IsReferenceOrContainsReferences<T>() == false)
             {
@@ -569,13 +649,43 @@ namespace DCFApixels.DragonECS
         {
             if (_isCustomLifecycle)
             {
+#if DEBUG
+                InvokeCustomOnDel(entityID, itemIndex);
+#else
                 _customLifecycle.OnDel(ref _items[itemIndex], _registrar.WorldID, entityID);
+#endif
             }
             else if (RuntimeHelpers.IsReferenceOrContainsReferences<T>())
             {
                 _items[itemIndex] = default;
             }
         }
+#if DEBUG
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        private void WarnStructuralChangeInCallback()
+        {
+            // Set before logging: a custom debug service may itself call into this pool.
+            _structuralChangeWarningPrinted = true;
+            EcsDebug.PrintWarning(
+                $"Add/Del in {nameof(EcsValuePool<T>)}<{typeof(T)}> (world {_registrar.WorldID}) during OnAdd/OnDel/Copy is unsafe and may invalidate component refs. " +
+                "Queue structural changes and apply them after the callback returns. This warning is printed once per pool.");
+        }
+        // Restore diagnostic depth even when user code throws; absent from Release.
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        private void InvokeCustomOnAdd(int entityID, ref T component)
+        {
+            _activeRefCallbacks++;
+            try { _customLifecycle.OnAdd(ref component, _registrar.WorldID, entityID); }
+            finally { _activeRefCallbacks--; }
+        }
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        private void InvokeCustomOnDel(int entityID, int itemIndex)
+        {
+            _activeRefCallbacks++;
+            try { _customLifecycle.OnDel(ref _items[itemIndex], _registrar.WorldID, entityID); }
+            finally { _activeRefCallbacks--; }
+        }
+#endif
         void IEcsPool.AddEmpty(int entityID) { Add(entityID); }
         void IEcsPool.AddRaw(int entityID, object dataRaw)
         {

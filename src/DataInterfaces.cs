@@ -6,6 +6,14 @@ using System.Runtime.CompilerServices;
 namespace DCFApixels.DragonECS.Core
 {
     #region IEcsWorldComponent
+    /// <summary>Initialization and destruction callbacks for a struct world component.</summary>
+    /// <remarks>
+    /// References passed to these callbacks remain attached to their component during nested
+    /// registration of the same type in other worlds. Storage growth is deferred and consolidated
+    /// when the outermost callback for that component type exits, including exceptional exits.
+    /// This does not extend the component's lifetime after release or world destruction, nor
+    /// guarantee that references held outside these callbacks survive later registrations.
+    /// </remarks>
     public interface IEcsWorldComponent<T>
     {
         void Init(ref T component, EcsWorld world);
@@ -40,6 +48,12 @@ namespace DCFApixels.DragonECS.Core
     #endregion
 
     #region IEcsComponentLifecycle
+    /// <summary>Custom initialization and removal callbacks for a struct component.</summary>
+    /// <remarks>
+    /// Structural changes to the same pool during OnAdd/OnDel are unsupported and may invalidate
+    /// the component reference. Queue these changes and apply them after the callback returns.
+    /// EcsPool and EcsValuePool only print a DEBUG warning once per pool; they do not prevent the operation.
+    /// </remarks>
     public interface IEcsComponentLifecycle<T>
     {
         void OnAdd(ref T component, short worldID, int entityID);
@@ -94,6 +108,12 @@ namespace DCFApixels.DragonECS.Core
     #endregion
 
     #region IEcsComponentCopy
+    /// <summary>Custom component copying using references to the source and destination.</summary>
+    /// <remarks>
+    /// Structural changes to either participating pool during Copy are unsupported and may invalidate
+    /// the references. Queue these changes and apply them after the callback returns.
+    /// EcsPool and EcsValuePool only print a DEBUG warning once per pool; they do not prevent the operation.
+    /// </remarks>
     public interface IEcsComponentCopy<T>
     {
         void Copy(ref T from, ref T to);
