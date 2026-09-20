@@ -1,8 +1,7 @@
 ﻿#if !UNITY_2020_3_OR_NEWER
-using System;
-
 namespace UnityEngine.Scripting
 {
+    using System;
     /// <summary>
     /// Dummy stub for Unity's PreserveAttribute to compile outside Unity environment (no actual preservation effect).
     /// </summary>
@@ -10,9 +9,11 @@ namespace UnityEngine.Scripting
     internal class PreserveAttribute : Attribute { }
 }
 #endif
+
 #if !UNITY_2021_3_OR_NEWER
 namespace UnityEngine
 {
+    using System;
     /// <summary>
     /// Dummy stub for Unity's HideInCallstackAttribute to compile outside Unity environment (no actual preservation effect).
     /// </summary>
